@@ -1,0 +1,36 @@
+[project]
+name = "vigil-ai-backend"
+version = "1.0.0"
+description = "VIGIL-AI Cameroun — National Cybersecurity AI Detection Platform Backend"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.flake8]
+max-line-length = 100
+exclude = [".git", "__pycache__", "migrations", ".venv"]
+extend-ignore = ["E203", "W503"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/main.py", "*/migrations/*", "*/tests/*"]
+
+[tool.coverage.report]
+fail_under = 70
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

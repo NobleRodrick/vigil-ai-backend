@@ -1,0 +1,165 @@
+version: "3.9"
+
+# ═══════════════════════════════════════════════════════════════════
+# VIGIL-AI CAMEROUN — Docker Compose (Local Development)
+# All services are FREE and open source
+# Usage: docker-compose up -d
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── PostgreSQL Database ──────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: vigilai_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vigilai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vigilai_secure_pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-vigilai_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vigilai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - vigilai_net
+
+  # ── Redis (Queue + Cache + Pub/Sub) ──────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: vigilai_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - vigilai_net
+
+  # ── FastAPI Backend ───────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: vigilai_api
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - upload_data:/app/uploads
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-vigilai}:${POSTGRES_PASSWORD:-vigilai_secure_pwd}@db:5432/${POSTGRES_DB:-vigilai_db}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vigilai_net
+
+  # ── Celery Worker (AI Analysis Tasks) ────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: vigilai_celery
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 -Q analysis,alerts,default
+    volumes:
+      - .:/app
+      - upload_data:/app/uploads
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-vigilai}:${POSTGRES_PASSWORD:-vigilai_secure_pwd}@db:5432/${POSTGRES_DB:-vigilai_db}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - vigilai_net
+
+  # ── Celery Beat (Scheduled Tasks) ────────────────────────────
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: vigilai_beat
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      - redis
+    networks:
+      - vigilai_net
+
+  # ── Flower (Celery Task Monitor — FREE web UI) ────────────────
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: vigilai_flower
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - redis
+    networks:
+      - vigilai_net
+
+  # ── MailHog (Local email testing — FREE) ─────────────────────
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: vigilai_mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI — open http://localhost:8025 to see emails
+    networks:
+      - vigilai_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  upload_data:
+
+networks:
+  vigilai_net:
+    driver: bridge
