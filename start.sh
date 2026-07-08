@@ -11,11 +11,18 @@
 #   - Uvicorn runs in the foreground, bound to $PORT, which is what
 #     Render actually monitors for health checks and routes traffic to
 #
+# --without-mingle/--without-gossip/--without-heartbeat: Upstash's free
+# Redis tier periodically closes idle connections, which caused repeated
+# reconnect failures during the mingle/gossip handshake in testing. These
+# flags skip that handshake entirely — safe since we're running a single
+# worker with nothing to discover.
+#
 # This file is invoked by setting Render's "Start Command" to:
 #   bash start.sh
 set -e
 
 celery -A app.workers.celery_app worker \
-  --loglevel=info -Q analysis,alerts,default --concurrency=1 &
+  --loglevel=info -Q celery,analysis,alerts,default --concurrency=1 \
+  --without-mingle --without-gossip --without-heartbeat &
 
 uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
