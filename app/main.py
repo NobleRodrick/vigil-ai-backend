@@ -87,11 +87,15 @@ All endpoints except `/api/v1/auth/login` require a Bearer JWT token:
 Authorization: Bearer <access_token>
 ```
 
-### Free AI Models Used
-- **Text**: HuggingFace `Hello-SimpleAI/chatgpt-detector-roberta`
-- **Image**: HuggingFace `Wvolf/ViT-Deepfake-Detection`
-- **Audio**: HuggingFace `facebook/wav2vec2-base`
-- All models are accessed via the **free** HuggingFace Inference API
+### Detection Cascade (100% free stack)
+Every analysis runs through a three-tier cascade — the platform never fails
+an analysis because a quota ran out:
+
+1. **Google Gemini** (`gemini-2.0-flash`, free tier) — multimodal text / image / audio reasoning, plus disinformation scoring for text
+2. **Hugging Face Inference API** (free tier) — specialist detector ensembles: RoBERTa AI-text detectors, fake-news classifiers, ViT deepfake-image detectors, wav2vec2 voice-clone detectors
+3. **Built-in forensic algorithms** (always available, offline) — stylometric analysis, linguistic credibility signals, ELA / FFT / noise-residual image forensics, audio signal statistics
+
+Media can be submitted **by URL** (default; direct links or platform videos via yt-dlp) or by **file upload** (optionally mirrored to Cloudinary).
 
 Built for the **5th Digital Innovation Week 2026 — MINPOSTEL Cameroun**
     """,

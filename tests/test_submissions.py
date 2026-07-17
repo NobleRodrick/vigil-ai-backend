@@ -60,11 +60,21 @@ class TestVideoSubmission:
             )
         assert response.status_code == 202
 
-    async def test_submit_video_invalid_domain(self, client: AsyncClient, analyst_headers: dict):
+    async def test_submit_video_direct_link_accepted(self, client: AsyncClient, analyst_headers: dict):
+        # Direct media links are now valid — they're fetched by streaming download
+        with patch("app.api.v1.submissions._enqueue_analysis"):
+            response = await client.post(
+                "/api/v1/submissions/video",
+                headers=analyst_headers,
+                json={"content_url": "https://example.org/videos/clip.mp4"},
+            )
+        assert response.status_code == 202
+
+    async def test_submit_video_invalid_scheme_rejected(self, client: AsyncClient, analyst_headers: dict):
         response = await client.post(
             "/api/v1/submissions/video",
             headers=analyst_headers,
-            json={"content_url": "https://suspicious-random-site.xyz/video.mp4"},
+            json={"content_url": "ftp://example.org/video.mp4"},
         )
         assert response.status_code == 422
 

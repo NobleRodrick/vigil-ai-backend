@@ -96,6 +96,13 @@ async def list_cases(
         query = query.where(Submission.case_number.ilike(f"%{search}%"))
     if content_type:
         query = query.where(Submission.content_type == content_type)
+    # Classification filter must be applied BEFORE counting/pagination,
+    # otherwise total_count ignores it and pages come back wrong.
+    if classification:
+        from app.models.submission import Analysis
+        query = query.join(Analysis, Analysis.submission_id == Case.submission_id).where(
+            Analysis.classification == classification
+        )
 
     # Count
     count_q = select(func.count()).select_from(query.subquery())
@@ -111,13 +118,6 @@ async def list_cases(
         .offset(pagination.offset)
         .limit(pagination.page_size)
     )
-
-    # Classification filter (join with analysis)
-    if classification:
-        from app.models.submission import Analysis
-        query = query.join(Analysis, Analysis.submission_id == Case.submission_id).where(
-            Analysis.classification == classification
-        )
 
     result = await db.execute(query)
     cases = result.scalars().all()
@@ -167,6 +167,18 @@ async def get_case(
     if sub and sub.content_text:
         preview = sub.content_text[:500] + "..." if len(sub.content_text) > 500 else sub.content_text
 
+    # Lift indicators/sub-scores out of the stored raw engine response
+    key_indicators = None
+    sub_scores = None
+    raw = analysis.raw_api_response if (analysis and isinstance(analysis.raw_api_response, dict)) else {}
+    if isinstance(raw.get("key_indicators"), list):
+        key_indicators = [str(i) for i in raw["key_indicators"]][:8]
+    if isinstance(raw.get("sub_scores"), dict):
+        sub_scores = {
+            str(k): float(v) for k, v in raw["sub_scores"].items()
+            if isinstance(v, (int, float))
+        }
+
     return CaseDetailResponse(
         id=case.id,
         status=case.status,
@@ -196,6 +208,8 @@ async def get_case(
         engine_used=analysis.engine_used if analysis else None,
         processing_time_ms=analysis.processing_time_ms if analysis else None,
         analyzed_at=analysis.analyzed_at if analysis else None,
+        key_indicators=key_indicators,
+        sub_scores=sub_scores,
         assignee_id=case.assigned_to,
         assignee_name=case.assignee.full_name if case.assignee else None,
         creator_name=case.creator.full_name if case.creator else None,

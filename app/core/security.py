@@ -23,8 +23,17 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plain password against a bcrypt hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify a plain password against a bcrypt hash.
+
+    Never raises: a malformed/truncated hash in the database must read as
+    'wrong password' (401), not crash the login endpoint (500).
+    """
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except (ValueError, TypeError) as e:
+        import logging
+        logging.getLogger(__name__).error(f"Malformed password hash encountered: {e}")
+        return False
 
 
 def validate_password_strength(password: str) -> tuple[bool, str]:

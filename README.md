@@ -15,15 +15,26 @@ Built for the 5th Digital Innovation Week 2026, MINPOSTEL Cameroun.
 | Database | PostgreSQL 16 | Free |
 | Cache / Queue | Redis 7.2 | Free |
 | Task Queue | Celery 5.4 | Free |
-| AI Text Detection | Google Gemini API (`gemini-2.0-flash`) | Free tier |
-| AI Image/Deepfake Detection | Google Gemini API (vision, same model) | Free tier |
-| AI Audio Detection | Google Gemini API (native audio understanding) + heuristics | Free tier |
-| File Storage | Local filesystem (Docker volume) | Free |
+| AI Tier 1 (all content types) | Google Gemini API (`gemini-2.0-flash`, multimodal + disinformation scoring) | Free tier |
+| AI Tier 2 — AI-text | Hugging Face: `Hello-SimpleAI/chatgpt-detector-roberta`, `openai-community/roberta-base-openai-detector` | Free tier |
+| AI Tier 2 — fake news | Hugging Face: `hamzab/roberta-fake-news-classification` | Free tier |
+| AI Tier 2 — image deepfakes | Hugging Face: `dima806/deepfake_vs_real_image_detection`, `prithivMLmods/Deep-Fake-Detector-v2-Model` | Free tier |
+| AI Tier 3 (always available) | Built-in forensic algorithms: stylometry, credibility signals, ELA / FFT / noise forensics, audio signal statistics | Free, offline |
+| Video URL fetching | yt-dlp (YouTube, Facebook, TikTok…) + direct-link streaming download | Free |
+| File Storage | Local filesystem + optional Cloudinary mirror | Free |
 | Email (dev) | MailHog (catches emails locally) | Free |
 | Task Monitoring | Flower | Free |
 | Auth | JWT (HS256) + bcrypt | Free |
 
-No paid AI API is required to run the MVP end-to-end. If you leave `GEMINI_API_KEY` blank, every detector automatically falls back to a built-in heuristic analyzer so the whole pipeline still works — just with lower accuracy.
+**The detection cascade never fails an analysis.** Every submission runs through
+Gemini → Hugging Face → local forensic algorithms; when an API key is missing,
+a quota is exhausted, or a service is down, the next tier takes over silently.
+Text is scored on two axes (AI-generation *and* disinformation), and every
+verdict includes bilingual FR/EN explanations plus key forensic indicators.
+
+Media (image / audio / video) is submitted **by URL by default** — the worker
+downloads it for analysis. File upload remains available for image/audio, with
+an optional free-tier Cloudinary mirror for durable hosting.
 
 ---
 
@@ -231,10 +242,10 @@ Full interactive documentation is auto-generated at **`/docs`**. Summary:
 | POST | `/api/v1/auth/login` | Public | Get JWT tokens |
 | POST | `/api/v1/auth/refresh` | Public | Refresh access token |
 | GET | `/api/v1/auth/me` | Any | Current user profile |
-| POST | `/api/v1/submissions/text` | Analyst | Submit text for AI analysis |
-| POST | `/api/v1/submissions/image` | Analyst | Upload image for deepfake check |
-| POST | `/api/v1/submissions/video` | Analyst | Submit video URL for analysis |
-| POST | `/api/v1/submissions/audio` | Analyst | Upload audio for voice-clone check |
+| POST | `/api/v1/submissions/text` | Analyst | Submit text for AI + fake-news analysis |
+| POST | `/api/v1/submissions/image` | Analyst | Submit image URL (or upload file) for deepfake check |
+| POST | `/api/v1/submissions/video` | Analyst | Submit video URL (platform or direct MP4) for analysis |
+| POST | `/api/v1/submissions/audio` | Analyst | Submit audio URL (or upload file) for voice-clone check |
 | GET | `/api/v1/cases` | Any | List cases (filterable) |
 | GET | `/api/v1/cases/{id}` | Any | Full case detail |
 | PATCH | `/api/v1/cases/{id}/status` | Analyst | Move case through workflow |
@@ -272,7 +283,9 @@ By default, emails print to the console (and are visible at http://localhost:802
 
 **Celery worker not picking up tasks** → Check `docker-compose logs celery_worker`. Make sure Redis is reachable.
 
-**Gemini API returns 429** → You've hit the free-tier daily/per-minute quota (15 req/min, 1500 req/day). The engine automatically falls back to the heuristic analyzer — no action needed, just expect lower accuracy until quota resets.
+**Gemini API returns 429** → You've hit the free-tier daily/per-minute quota (15 req/min, 1500 req/day). The engine automatically falls to the Hugging Face detector ensemble, and if that is also unavailable, to the built-in forensic algorithms — no action needed, analyses keep completing.
+
+**Hugging Face returns 429/402** → Free-tier inference credits exhausted for the month. Same graceful degradation: local forensic algorithms take over automatically.
 
 **File upload fails with "Invalid file type"** → The server validates actual file content (via `python-magic`), not just the extension. Make sure the file isn't corrupted.
 

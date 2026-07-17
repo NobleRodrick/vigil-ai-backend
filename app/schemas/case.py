@@ -113,6 +113,8 @@ class CaseDetailResponse(BaseModel):
     engine_used: str | None
     processing_time_ms: int | None
     analyzed_at: datetime | None
+    key_indicators: list[str] | None = None
+    sub_scores: dict[str, float] | None = None
     # People
     assignee_id: uuid.UUID | None
     assignee_name: str | None

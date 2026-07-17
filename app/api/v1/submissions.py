@@ -12,7 +12,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, Form, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Query, UploadFile
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import selectinload
 
@@ -49,14 +49,46 @@ async def _generate_case_number(db) -> str:
     return f"VIGIL-{year}-{count:05d}"
 
 
-def _enqueue_analysis(submission_id: str):
-    """Dispatch analysis task to Celery."""
+async def _run_analysis_inline(submission_id: str):
+    """Fallback: run the analysis inside the API process when the Celery
+    broker is unreachable, so submissions never sit in 'queued' forever."""
+    try:
+        from app.workers.tasks import _run_analysis_async
+        await _run_analysis_async(submission_id)
+    except Exception as e:
+        logger.error(f"Inline analysis fallback failed for {submission_id}: {e}")
+
+
+def _enqueue_analysis(submission_id: str, background_tasks: BackgroundTasks):
+    """Dispatch analysis to Celery; degrade to an in-process background task
+    if the broker is unavailable."""
     try:
         from app.workers.tasks import run_analysis
         run_analysis.delay(submission_id)
         logger.info(f"Analysis task enqueued for {submission_id}")
     except Exception as e:
-        logger.error(f"Failed to enqueue analysis: {e}")
+        logger.warning(f"Celery unavailable ({e}) — running analysis in-process")
+        background_tasks.add_task(_run_analysis_inline, submission_id)
+
+
+def _validate_media_url(url: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValidationError("content_url must be a valid HTTP(S) URL")
+    return url
+
+
+async def _mirror_to_cloudinary(file_bytes: bytes, content_type: str, case_number: str) -> str | None:
+    """Best-effort mirror of an uploaded file to Cloudinary (if configured)."""
+    from starlette.concurrency import run_in_threadpool
+    from app.services.cloudinary_service import cloudinary_service
+
+    if not cloudinary_service.enabled:
+        return None
+    return await run_in_threadpool(
+        cloudinary_service.upload, file_bytes, content_type, case_number
+    )
 
 
 # ── TEXT SUBMISSION ────────────────────────────────────────────
@@ -70,6 +102,7 @@ async def submit_text(
     payload: TextSubmissionCreate,
     current_user: AnalystUser,
     db: DBSession,
+    background_tasks: BackgroundTasks,
 ):
     """
     Submit text (French, English, or Cameroonian Pidgin) for AI-detection analysis.
@@ -105,7 +138,7 @@ async def submit_text(
     await db.commit()
 
     # Enqueue analysis
-    _enqueue_analysis(str(submission.id))
+    _enqueue_analysis(str(submission.id), background_tasks)
 
     logger.info(f"Text submission created: {case_number} by {current_user.email}")
     return SubmissionQueuedResponse(
@@ -120,35 +153,56 @@ async def submit_text(
     "/image",
     response_model=SubmissionQueuedResponse,
     status_code=202,
-    summary="Upload an image for deepfake detection",
+    summary="Submit an image (URL or optional file upload) for deepfake detection",
 )
 async def submit_image(
     current_user: AnalystUser,
     db: DBSession,
-    file: UploadFile = File(..., description="Image file (JPG, PNG, WebP)"),
+    background_tasks: BackgroundTasks,
+    file: UploadFile | None = File(default=None, description="Image file (JPG, PNG, WebP) — optional"),
+    content_url: str | None = Form(default=None, description="Direct URL of the image to analyze"),
     source_url: str | None = Form(default=None),
     analyst_notes: str | None = Form(default=None),
 ):
-    """Upload an image file for AI-based deepfake and manipulation detection."""
-    file_bytes = await file.read()
-
-    # Save to storage (validation happens inside)
-    file_path, safe_filename, file_size = await storage_service.save_file(
-        file_bytes=file_bytes,
-        original_filename=file.filename or "image",
-        content_type="image",
-        expected_mime_types=settings.ALLOWED_IMAGE_TYPE_LIST,
-    )
+    """
+    Submit an image for AI-based deepfake and manipulation detection.
+    Provide EITHER a direct image URL (default workflow) OR upload a file.
+    Uploaded files are mirrored to Cloudinary when configured.
+    """
+    if file is None and not content_url:
+        raise ValidationError("Provide an image URL (content_url) or upload a file")
 
     case_number = await _generate_case_number(db)
+    file_path = file_name = mime_type = None
+    file_size = None
+    media_url = None
+
+    if file is not None:
+        file_bytes = await file.read()
+        # Save to storage (validation happens inside)
+        file_path, safe_filename, file_size = await storage_service.save_file(
+            file_bytes=file_bytes,
+            original_filename=file.filename or "image",
+            content_type="image",
+            expected_mime_types=settings.ALLOWED_IMAGE_TYPE_LIST,
+        )
+        file_name = file.filename
+        mime_type = file.content_type
+        # Optional durable mirror (also lets the worker re-fetch the media
+        # if the local disk is ephemeral)
+        media_url = await _mirror_to_cloudinary(file_bytes, "image", case_number)
+    else:
+        media_url = _validate_media_url(content_url)
+
     submission = Submission(
         case_number=case_number,
         submitted_by=current_user.id,
         content_type="image",
         file_path=file_path,
-        file_name=file.filename,
+        file_name=file_name,
         file_size_bytes=file_size,
-        mime_type=file.content_type,
+        mime_type=mime_type,
+        content_url=media_url,
         source_url=source_url,
         analyst_notes=analyst_notes,
         status=SubmissionStatus.QUEUED.value,
@@ -164,17 +218,22 @@ async def submit_image(
         action=AuditAction.SUBMISSION_CREATED,
         resource_type="submission",
         resource_id=submission.id,
-        details={"case_number": case_number, "type": "image", "filename": file.filename},
+        details={
+            "case_number": case_number,
+            "type": "image",
+            "filename": file_name,
+            "content_url": content_url,
+        },
     )
     db.add(audit)
     await db.commit()
 
-    _enqueue_analysis(str(submission.id))
+    _enqueue_analysis(str(submission.id), background_tasks)
 
     return SubmissionQueuedResponse(
         case_number=case_number,
         submission_id=submission.id,
-        message=f"Image uploaded as {case_number}. Deepfake analysis queued.",
+        message=f"Image submitted as {case_number}. Deepfake analysis queued.",
     )
 
 
@@ -189,8 +248,9 @@ async def submit_video(
     payload: VideoSubmissionCreate,
     current_user: AnalystUser,
     db: DBSession,
+    background_tasks: BackgroundTasks,
 ):
-    """Submit a video URL (YouTube, Facebook, etc.) for deepfake analysis."""
+    """Submit a video URL (YouTube, Facebook, TikTok… or a direct MP4 link) for deepfake analysis."""
     case_number = await _generate_case_number(db)
     submission = Submission(
         case_number=case_number,
@@ -216,7 +276,7 @@ async def submit_video(
     db.add(audit)
     await db.commit()
 
-    _enqueue_analysis(str(submission.id))
+    _enqueue_analysis(str(submission.id), background_tasks)
 
     return SubmissionQueuedResponse(
         case_number=case_number,
@@ -230,34 +290,53 @@ async def submit_video(
     "/audio",
     response_model=SubmissionQueuedResponse,
     status_code=202,
-    summary="Upload audio for voice clone detection",
+    summary="Submit audio (URL or optional file upload) for voice clone detection",
 )
 async def submit_audio(
     current_user: AnalystUser,
     db: DBSession,
-    file: UploadFile = File(..., description="Audio file (MP3, WAV, OGG)"),
+    background_tasks: BackgroundTasks,
+    file: UploadFile | None = File(default=None, description="Audio file (MP3, WAV, OGG) — optional"),
+    content_url: str | None = Form(default=None, description="Direct URL of the audio to analyze"),
     source_url: str | None = Form(default=None),
     analyst_notes: str | None = Form(default=None),
 ):
-    """Upload an audio file for voice cloning and synthetic speech detection."""
-    file_bytes = await file.read()
-
-    file_path, safe_filename, file_size = await storage_service.save_file(
-        file_bytes=file_bytes,
-        original_filename=file.filename or "audio",
-        content_type="audio",
-        expected_mime_types=settings.ALLOWED_AUDIO_TYPE_LIST,
-    )
+    """
+    Submit audio for voice cloning and synthetic speech detection.
+    Provide EITHER a direct audio URL (default workflow) OR upload a file.
+    Uploaded files are mirrored to Cloudinary when configured.
+    """
+    if file is None and not content_url:
+        raise ValidationError("Provide an audio URL (content_url) or upload a file")
 
     case_number = await _generate_case_number(db)
+    file_path = file_name = mime_type = None
+    file_size = None
+    media_url = None
+
+    if file is not None:
+        file_bytes = await file.read()
+        file_path, safe_filename, file_size = await storage_service.save_file(
+            file_bytes=file_bytes,
+            original_filename=file.filename or "audio",
+            content_type="audio",
+            expected_mime_types=settings.ALLOWED_AUDIO_TYPE_LIST,
+        )
+        file_name = file.filename
+        mime_type = file.content_type
+        media_url = await _mirror_to_cloudinary(file_bytes, "audio", case_number)
+    else:
+        media_url = _validate_media_url(content_url)
+
     submission = Submission(
         case_number=case_number,
         submitted_by=current_user.id,
         content_type="audio",
         file_path=file_path,
-        file_name=file.filename,
+        file_name=file_name,
         file_size_bytes=file_size,
-        mime_type=file.content_type,
+        mime_type=mime_type,
+        content_url=media_url,
         source_url=source_url,
         analyst_notes=analyst_notes,
         status=SubmissionStatus.QUEUED.value,
@@ -272,17 +351,17 @@ async def submit_audio(
         action=AuditAction.SUBMISSION_CREATED,
         resource_type="submission",
         resource_id=submission.id,
-        details={"case_number": case_number, "type": "audio"},
+        details={"case_number": case_number, "type": "audio", "content_url": content_url},
     )
     db.add(audit)
     await db.commit()
 
-    _enqueue_analysis(str(submission.id))
+    _enqueue_analysis(str(submission.id), background_tasks)
 
     return SubmissionQueuedResponse(
         case_number=case_number,
         submission_id=submission.id,
-        message=f"Audio uploaded as {case_number}. Voice analysis queued.",
+        message=f"Audio submitted as {case_number}. Voice analysis queued.",
     )
 
 
@@ -310,7 +389,8 @@ async def list_submissions(
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
-    # Paginate
+    # Paginate (eager-load analysis so list rows can show the verdict)
+    query = query.options(selectinload(Submission.analysis))
     query = query.order_by(Submission.created_at.desc())
     query = query.offset(pagination.offset).limit(pagination.page_size)
     result = await db.execute(query)
@@ -360,7 +440,7 @@ async def get_submission(
     from app.schemas.submission import AnalysisResponse
     analysis_resp = None
     if submission.analysis:
-        analysis_resp = AnalysisResponse.model_validate(submission.analysis)
+        analysis_resp = AnalysisResponse.from_analysis(submission.analysis)
 
     return SubmissionDetailResponse(
         id=submission.id,

@@ -21,14 +21,17 @@ from app.models.user import Role, User
 
 
 # ── Test Database Setup ───────────────────────────────────────
-TEST_DATABASE_URL = settings.DATABASE_URL.replace(
-    settings.POSTGRES_DB, f"{settings.POSTGRES_DB}_test"
-)
+def _test_database_url() -> str:
+    """Derive the test-database URL by suffixing the database *path segment*
+    only (a plain str.replace corrupts the URL when the DB is named
+    'postgres', which also appears in the scheme and username)."""
+    from urllib.parse import urlsplit, urlunsplit
 
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=None)
-TestSessionLocal = async_sessionmaker(
-    bind=test_engine, class_=AsyncSession, expire_on_commit=False
-)
+    parsed = urlsplit(settings.DATABASE_URL)
+    db_name = (parsed.path or "/").lstrip("/") or "vigilai_db"
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, f"/{db_name}_test", parsed.query, parsed.fragment)
+    )
 
 
 @pytest.fixture(scope="session")
@@ -39,19 +42,23 @@ def event_loop():
     loop.close()
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def setup_test_db():
-    """Create all tables before the test session, drop after."""
-    async with test_engine.begin() as conn:
+# NOTE: engine creation is lazy and NOT autouse — pure unit tests
+# (heuristics, engine fallback) must run without a PostgreSQL instance.
+# Any fixture that touches the DB depends on test_engine explicitly.
+@pytest_asyncio.fixture(scope="session")
+async def test_engine():
+    """Create the test engine + schema for the session, drop after."""
+    engine = create_async_engine(_test_database_url(), echo=False, poolclass=None)
+    async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with test_engine.begin() as conn:
+    yield engine
+    async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
-    await test_engine.dispose()
+    await engine.dispose()
 
 
 @pytest_asyncio.fixture
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
+async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
     """Provide a transactional database session for each test (rolled back after)."""
     async with test_engine.connect() as conn:
         trans = await conn.begin()

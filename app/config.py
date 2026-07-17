@@ -82,6 +82,60 @@ class Settings(BaseSettings):
     # Max inline file size Gemini accepts without the File API (bytes)
     GEMINI_INLINE_FILE_LIMIT: int = 15 * 1024 * 1024  # 15MB
 
+    # ── Hugging Face Inference API (FREE tier) ────────────────
+    # Get a free token at https://huggingface.co/settings/tokens
+    # Used as the second detection tier when Gemini is unavailable or
+    # rate-limited. Each setting is a comma-separated list of model IDs
+    # tried in order; results from responsive models are ensembled.
+    HF_API_KEY: str = ""
+    HF_API_BASE: str = "https://router.huggingface.co/hf-inference/models"
+    HF_API_FALLBACK_BASE: str = "https://api-inference.huggingface.co/models"
+    HF_TIMEOUT_SECONDS: float = 40.0
+    HF_TEXT_AI_MODELS: str = (
+        "Hello-SimpleAI/chatgpt-detector-roberta,"
+        "openai-community/roberta-base-openai-detector"
+    )
+    HF_FAKE_NEWS_MODELS: str = "hamzab/roberta-fake-news-classification"
+    HF_IMAGE_DEEPFAKE_MODELS: str = (
+        "dima806/deepfake_vs_real_image_detection,"
+        "prithivMLmods/Deep-Fake-Detector-v2-Model"
+    )
+    HF_AUDIO_DEEPFAKE_MODELS: str = "MelodyMachine/Deepfake-audio-detection-V2"
+
+    @property
+    def HF_TEXT_AI_MODEL_LIST(self) -> List[str]:
+        return [m.strip() for m in self.HF_TEXT_AI_MODELS.split(",") if m.strip()]
+
+    @property
+    def HF_FAKE_NEWS_MODEL_LIST(self) -> List[str]:
+        return [m.strip() for m in self.HF_FAKE_NEWS_MODELS.split(",") if m.strip()]
+
+    @property
+    def HF_IMAGE_DEEPFAKE_MODEL_LIST(self) -> List[str]:
+        return [m.strip() for m in self.HF_IMAGE_DEEPFAKE_MODELS.split(",") if m.strip()]
+
+    @property
+    def HF_AUDIO_DEEPFAKE_MODEL_LIST(self) -> List[str]:
+        return [m.strip() for m in self.HF_AUDIO_DEEPFAKE_MODELS.split(",") if m.strip()]
+
+    # ── Cloudinary (optional media hosting — FREE tier) ───────
+    # Either set CLOUDINARY_URL=cloudinary://<api_key>:<api_secret>@<cloud_name>
+    # or the three individual values. When configured, uploaded media is
+    # mirrored to Cloudinary so files survive ephemeral-disk restarts.
+    CLOUDINARY_URL: str = ""
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+    CLOUDINARY_MAX_MB: int = 10  # only mirror files up to this size
+    CLOUDINARY_FOLDER: str = "vigil-ai"
+
+    # ── Remote media fetching (URL submissions) ───────────────
+    URL_FETCH_MAX_MB: int = 25          # cap for direct media downloads
+    URL_FETCH_TIMEOUT_SECONDS: float = 60.0
+    YTDLP_ENABLED: bool = True          # use yt-dlp for platform video URLs
+    YTDLP_MAX_FILESIZE_MB: int = 60
+    YTDLP_MAX_DURATION_SECONDS: int = 600
+
     # ── Email ─────────────────────────────────────────────────
     EMAIL_ENABLED: bool = False
     SMTP_HOST: str = "localhost"
