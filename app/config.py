@@ -161,7 +161,9 @@ class Settings(BaseSettings):
     # ── Risk Score Thresholds ─────────────────────────────────
     RISK_SCORE_SAFE_MAX: int = 29
     RISK_SCORE_SUSPICIOUS_MAX: int = 69
-    AUTO_CREATE_CASE_MIN_SCORE: int = 30
+    # 0 = every analyzed submission becomes a reviewable case (full audit
+    # coverage); raise it to only open cases for higher-risk content.
+    AUTO_CREATE_CASE_MIN_SCORE: int = 0
 
 
 @lru_cache
